@@ -100,9 +100,34 @@ def scan_for_cleanup(scan_type: str = Field(description="Type: 'duplicates'.")):
 
 tools = [search_photos, delete_photos, create_collage, move_photos_to_album, apply_filter, get_photo_metadata, scan_for_cleanup]
 
+# --- VLLM / QWEN-VL HOSTING (FUTURE REFERENCE) ---
+"""
+To use a self-hosted Qwen-VL model via vLLM:
+
+1. Host the model:
+   vllm serve Qwen/Qwen2-VL-7B-Instruct --host 0.0.0.0 --port 8000
+
+2. Use the ChatOpenAI client (vLLM is OpenAI-compatible):
+
+from langchain_openai import ChatOpenAI
+
+llm = ChatOpenAI(
+    model="Qwen/Qwen2-VL-7B-Instruct",
+    openai_api_key="EMPTY",
+    openai_api_base="http://YOUR_VLLM_SERVER_IP:8000/v1",
+    temperature=0
+)
+
+3. Image Format:
+   The 'agent_node' logic below (using image_url) works seamlessly with vLLM's 
+   OpenAI-compatible endpoint for standard models.
+"""
+
 # --- LLM ---
 llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=api_key, temperature=0)
 llm_with_tools = llm.bind_tools(tools)
+
+
 
 def agent_node(state: MessagesState):
     messages_to_send = [SystemMessage(content=get_system_prompt())] + state["messages"]
