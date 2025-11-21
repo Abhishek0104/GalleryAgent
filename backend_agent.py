@@ -7,6 +7,7 @@ from typing import List, Dict, Any, Optional, Literal
 import uuid
 from datetime import datetime
 import re
+import logging # Import logging module
 
 # --- NEW IMPORTS FOR GEMINI ---
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -26,6 +27,13 @@ def get_system_prompt():
         f"You are a helpful gallery assistant. Today is {current_date}. "
         "You have access to tools to manage the user's photo gallery. "
         
+        "--- DATA HANDLING RULES (CRITICAL) ---"
+        "1. **CONTEXT URIs:** If the user message contains a section '[Developer Note: User context URIs: ...]', "
+        "   these are the specific photos the user wants you to act on."
+        "2. **TOOL ARGS:** When calling tools like `create_collage`, `delete_photos`, or `apply_filter`, "
+        "   you MUST copy those exact URIs into the `photo_uris` argument."
+        "3. **DO NOT ASK:** Never ask 'Could you provide the URIs?' if they are already present in the Developer Note. Just proceed."
+        
         "--- CONTEXT AWARENESS ---"
         "If the user refines a search (e.g., 'show only the ones from 2023'), you MUST maintain the original search query from the conversation history. "
         "Example: User said 'find cats', then 'from 2023'. You call search_photos(query='cats', start_date='2023-01-01'...). "
@@ -43,6 +51,8 @@ def get_system_prompt():
         "--- CORE RULES ---"
         "1. **DO NOT ECHO FILE PATHS.**"
         "2. **USE USER SELECTIONS.**"
+        "3. **LOCATION SEARCH:** If the user asks for photos from a specific place (e.g. 'London', 'Home', 'the beach'), "
+        "   pass that location name to the search tool. Do NOT try to guess coordinates."
     )
 
 # --- HELPER FUNCTIONS ---
@@ -64,41 +74,47 @@ def extract_suggestions(text: str):
 
 # --- TOOLS ---
 @tool
-def search_photos(query: str = Field(description="Semantic search query. KEEP previous query if user is filtering results."), start_date: str = Field(description="Start date YYYY-MM-DD"), end_date: str = Field(description="End date YYYY-MM-DD")):
-    """Hybrid search."""
+def search_photos(
+    query: str = Field(description="Semantic search query (e.g. 'cats', 'receipts')."), 
+    start_date: str = Field(description="Start date YYYY-MM-DD"), 
+    end_date: str = Field(description="End date YYYY-MM-DD"),
+    location: str = Field(description="City, country, or place name (e.g. 'Paris', 'California').")
+):
+    """Hybrid search using semantics, date, and location."""
     pass
 
 @tool
 def delete_photos(photo_uris: List[str] = Field(description="URIs to delete.")):
-    """Delete photos."""
+    """Delete specific photos. Use the exact URIs provided in the context."""
     pass
 
 @tool
 def apply_filter(photo_uris: List[str] = Field(description="URIs."), filter_name: str = Field(description="Filter name.")):
-    """Apply filter."""
+    """Apply filter to photos."""
     pass
 
 @tool
-def create_collage(photo_uris: List[str] = Field(description="URIs."), title: str = Field(description="Title.")):
-    """Create collage."""
+def create_collage(photo_uris: List[str] = Field(description="List of photo URIs to include in the collage.")):
+    """Create a collage from the provided list of photo URIs."""
     pass
 
 @tool
 def move_photos_to_album(photo_uris: List[str] = Field(description="URIs."), album_name: str = Field(description="Album.")):
-    """Move to album."""
+    """Move photos to an album."""
     pass
 
 @tool
 def get_photo_metadata(photo_uris: List[str] = Field(description="URIs.")):
-    """Read metadata."""
+    """Read metadata from photos."""
     pass
 
 @tool
 def scan_for_cleanup(scan_type: str = Field(description="Type: 'duplicates'.")):
-    """Scan duplicates."""
+    """Scan for duplicates."""
     pass
 
 tools = [search_photos, delete_photos, create_collage, move_photos_to_album, apply_filter, get_photo_metadata, scan_for_cleanup]
+
 
 # --- VLLM / QWEN-VL HOSTING (FUTURE REFERENCE) ---
 """
@@ -124,10 +140,8 @@ llm = ChatOpenAI(
 """
 
 # --- LLM ---
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=api_key, temperature=0)
+llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=api_key, temperature=0)
 llm_with_tools = llm.bind_tools(tools)
-
-
 
 def agent_node(state: MessagesState):
     messages_to_send = [SystemMessage(content=get_system_prompt())] + state["messages"]
@@ -170,6 +184,8 @@ class AgentResponse(BaseModel):
 
 @app.post("/agent/invoke", response_model=AgentResponse)
 async def invoke_agent(request: AgentRequest):
+    logging.info(f"Incoming request: {request.model_dump_json(indent=2)}") # Log the entire request object
+
     session_id = request.sessionId or str(uuid.uuid4())
     config = {"configurable": {"thread_id": session_id}}
 
@@ -178,6 +194,7 @@ async def invoke_agent(request: AgentRequest):
         text_content = request.userInput
         if request.selectedUris:
             uri_list = ", ".join(request.selectedUris)
+            # --- CRITICAL: Explicitly formatted block for the LLM ---
             text_content += f"\n\n[Developer Note: User context URIs: {uri_list}]"
         content_parts.append({"type": "text", "text": text_content})
         if request.base64Images:
@@ -196,18 +213,22 @@ async def invoke_agent(request: AgentRequest):
 
     if last_msg.tool_calls:
         actions = [ToolCall(id=tc["id"], name=tc["name"], args=tc["args"]) for tc in last_msg.tool_calls]
-        return AgentResponse(sessionId=session_id, status="requires_action", nextActions=actions)
+        response_obj = AgentResponse(sessionId=session_id, status="requires_action", nextActions=actions)
+        logging.info(f"Outgoing response (Tool Call): {response_obj.model_dump_json(indent=2)}") # Log response requiring action
+        return response_obj
     else:
         raw_text = parse_message_content(last_msg.content)
         clean_text, suggestions_list = extract_suggestions(raw_text)
         suggestions_model = [Suggestion(**s) for s in suggestions_list] if suggestions_list else None
 
-        return AgentResponse(
+        response_obj = AgentResponse(
             sessionId=session_id, 
             status="complete", 
             agentMessage=clean_text,
             suggestedActions=suggestions_model
         )
+        logging.info(f"Outgoing response (Complete): {response_obj.model_dump_json(indent=2)}") # Log complete response
+        return response_obj
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
