@@ -19,6 +19,9 @@ from langgraph.checkpoint.memory import MemorySaver
 load_dotenv()
 api_key = os.getenv("GOOGLE_API_KEY") 
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 # --- DYNAMIC SYSTEM PROMPT ---
 def get_system_prompt():
     current_date = datetime.now().strftime("%Y-%m-%d")
