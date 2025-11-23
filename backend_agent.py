@@ -18,7 +18,6 @@ from langgraph.checkpoint.memory import MemorySaver
 
 load_dotenv()
 api_key = os.getenv("GOOGLE_API_KEY") 
-
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -81,7 +80,8 @@ def search_photos(
     query: str = Field(description="Semantic search query (e.g. 'cats', 'receipts')."), 
     start_date: str = Field(description="Start date YYYY-MM-DD"), 
     end_date: str = Field(description="End date YYYY-MM-DD"),
-    location: str = Field(description="City, country, or place name (e.g. 'Paris', 'California').")
+    location: str = Field(description="City, country, or place name (e.g. 'Paris', 'California')."),
+    people: List[str] = Field(description="List of person names to filter by. Use 'Me' for the user.")
 ):
     """Hybrid search using semantics, date, and location."""
     pass
@@ -143,7 +143,7 @@ llm = ChatOpenAI(
 """
 
 # --- LLM ---
-llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=api_key, temperature=0)
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=api_key, temperature=0)
 llm_with_tools = llm.bind_tools(tools)
 
 def agent_node(state: MessagesState):
