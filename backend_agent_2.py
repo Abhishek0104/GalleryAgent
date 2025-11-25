@@ -35,7 +35,16 @@ def get_system_prompt():
         "2. **TOOL ARGS:** When calling tools like `create_collage`, `delete_photos`, or `move_photos_to_album`, "
         "   you MUST provide the `photo_uris` argument."
         
-        "--- TOOL CHAINING RULES (THE MOST IMPORTANT PART) ---"
+        "--- SEARCH QUERY RULES (CRITICAL) ---"
+        "1. **PEOPLE vs OBJECTS:** You must distinguish between searching for *content* and *people*."
+        "   - If the user asks for a PERSON (e.g., 'Photos of Alice', 'Mom', 'Dad', 'John'), you MUST put their name "
+        "     into the `people` list argument. Example: `search_photos(people=['Alice'])`."
+        "   - If the user asks for an OBJECT or SCENE (e.g., 'Cow', 'Beach', 'Car'), put it in the `query` argument. "
+        "     Example: `search_photos(query='Cow')`."
+        "   - You can use both. Example: 'Alice at the beach' -> `search_photos(query='beach', people=['Alice'])`."
+        "2. **'ME' / SELF:** If the user says 'photos of me', put 'Me' in the `people` list: `people=['Me']`."
+
+        "--- TOOL CHAINING RULES ---"
         "1. **SEARCH FIRST:** If a user asks to 'delete cat photos', you cannot just guess."
         "   First, call `search_photos(query='cat')`."
         "2. **READ OUTPUT:** The search tool will return a JSON object like: "
@@ -58,11 +67,11 @@ def search_photos(query: str = "", start_date: str = None, end_date: str = None,
     """
     Searches for photos on the device.
     Args:
-        query: Content description (e.g. "cat", "receipt", "sunset").
+        query: Content description (e.g. "cat", "receipt", "sunset"). Use this for objects/scenes.
         start_date: Format YYYY-MM-DD.
         end_date: Format YYYY-MM-DD.
         location: City or country name (e.g. "Paris").
-        people: List of names (e.g. ["Alice", "Bob", "Me"]).
+        people: List of PERSON NAMES (e.g. ["Alice", "Bob", "Me"]). Use this for humans.
     Returns:
         JSON object: {"count": int, "uris": List[str]}.
         IMPORTANT: The 'uris' list contains the identifiers you NEED for other tools.
