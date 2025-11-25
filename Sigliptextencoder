@@ -1,0 +1,107 @@
+package com.example.siglipsemanticsearch
+
+import android.content.Context
+import android.util.Log
+import ai.onnxruntime.OnnxTensor
+import ai.onnxruntime.OrtEnvironment
+import ai.onnxruntime.OrtSession
+import java.io.File
+import java.io.FileOutputStream
+import java.nio.LongBuffer
+import java.util.Collections
+
+class SiglipTextEncoder(
+    private val context: Context,
+    private val modelName: String = "siglip_text_features.onnx" // Assuming you fixed the model
+) {
+    private var env: OrtEnvironment? = null
+    private var session: OrtSession? = null
+    
+    // CHANGED: Use the new Unigram Tokenizer
+    private var tokenizer: SiglipUnigramTokenizer? = null
+
+    companion object {
+        private const val TAG = "SiglipTextEncoder"
+        private const val SEQUENCE_LENGTH = 64
+    }
+
+    init {
+        setup()
+    }
+
+    private fun setup() {
+        try {
+            env = OrtEnvironment.getEnvironment()
+            
+            // 1. Load Model
+            val modelFile = assetToFile(modelName)
+            val sessionOptions = OrtSession.SessionOptions()
+            session = env?.createSession(modelFile.absolutePath, sessionOptions)
+
+            // 2. Setup Unigram Tokenizer
+            // Reads "tokenizer.json" from assets by default
+            tokenizer = SiglipUnigramTokenizer(context, "tokenizer.json")
+
+            Log.d(TAG, "SiglipTextEncoder initialized with Unigram Tokenizer!")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to initialize SiglipTextEncoder", e)
+            throw RuntimeException("Initialization failed", e)
+        }
+    }
+
+    fun encode(text: String): FloatArray {
+        val loadedSession = session ?: throw IllegalStateException("Session not loaded")
+        val loadedTokenizer = tokenizer ?: throw IllegalStateException("Tokenizer not loaded")
+        val loadedEnv = env ?: throw IllegalStateException("Environment not loaded")
+
+        val startTime = System.currentTimeMillis()
+
+        // 1. Tokenize (Returns IntArray of size 64)
+        val tokenIds = loadedTokenizer.tokenize(text)
+
+        // 2. Create Tensor
+        val shape = longArrayOf(1, SEQUENCE_LENGTH.toLong())
+        val tokenIdsLong = tokenIds.map { it.toLong() }.toLongArray()
+        val longBuffer = LongBuffer.wrap(tokenIdsLong)
+        val inputTensor = OnnxTensor.createTensor(loadedEnv, longBuffer, shape)
+
+        // 3. Run Inference
+        val inputs = Collections.singletonMap("input_ids", inputTensor)
+        val results = loadedSession.run(inputs)
+
+        // 4. Extract Output
+        // The output name depends on your export! 
+        // If you exported for features, it might be "pooler_output" or "last_hidden_state"
+        // Adjust index [0] or [1] accordingly.
+        val outputTensor = results[0] as OnnxTensor 
+        val floatBuffer = outputTensor.floatBuffer
+
+        val embedding = FloatArray(floatBuffer.remaining())
+        floatBuffer.get(embedding)
+
+        inputTensor.close()
+        results.close()
+
+        Log.d(TAG, "Inference finished. Embedding size: ${embedding.size}")
+        return embedding
+    }
+
+    fun destroy() {
+        session?.close()
+        env?.close()
+    }
+
+    private fun assetToFile(assetName: String): File {
+        val file = File(context.filesDir, assetName)
+        if (!file.exists()) {
+            context.assets.open(assetName).use { inputStream ->
+                FileOutputStream(file).use { outputStream ->
+                    inputStream.copyTo(outputStream)
+                }
+            }
+        }
+        return file
+    }
+}
+
