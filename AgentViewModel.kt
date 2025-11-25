@@ -64,16 +64,7 @@ data class AgentUiState(
 enum class PermissionType { DELETE, WRITE }
 
 class AgentViewModel(
-    // ... params ...
-) : ViewModel() {
-
-    // ... existing variables ...
-    
-    // --- NEW: CLIENT-SIDE MEMORY ---
-    // Stores the full list of results from the last search locally.
-    // No need to send these to the LLM.
-    private var lastSearchResults: List<String> = emptyList()
-
+    private val application: Application,
     private val agentApi: AgentApiService,
     private val galleryTools: GalleryTools,
     private val gson: Gson,
@@ -83,6 +74,11 @@ class AgentViewModel(
     private val textEncoder: TextEncoder,
     private val cleanupManager: CleanupManager
 ) : ViewModel() {
+
+    // --- NEW: CLIENT-SIDE MEMORY ---
+    // Stores the full list of results from the last search locally.
+    // No need to send these to the LLM.
+    private var lastSearchResults: List<String> = emptyList()
 
     private val TAG = "AgentViewModel"
     private var currentSessionId: String = UUID.randomUUID().toString()
