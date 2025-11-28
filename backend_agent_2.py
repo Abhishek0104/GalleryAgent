@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 import uvicorn
 from fastapi import FastAPI
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional, Literal
 import uuid
 from datetime import datetime
@@ -27,243 +27,239 @@ def get_system_prompt():
     
     return (
         f"You are a helpful gallery assistant. Today is {current_date}. "
-        "You have access to client-side tools to manage the user's photo gallery. "
+        "You have access to tools to manage the user's photo gallery. "
         
         "--- DATA HANDLING RULES (CRITICAL) ---"
-        "1. **CONTEXT URIs:** If the user message contains a section '[Developer Note: User context URIs: ...]', "
-        "   these are the specific photos the user wants you to act on."
-        "2. **TOOL ARGS:** When calling tools like `create_collage`, `delete_photos`, or `move_photos_to_album`, "
-        "   you MUST provide the `photo_uris` argument."
+        "1. **MANUAL SELECTION:** If the user has manually selected photos (indicated by 'User context URIs' in the input), "
+        "   and asks to act on 'them', 'these', or 'the selection', you MUST set `use_current_selection=True` in the tool call. "
+        "   Do NOT repeat the list of URIs in the `photo_uris` argument."
         
-        "--- SEARCH QUERY RULES (CRITICAL) ---"
-        "1. **PEOPLE vs OBJECTS:** You must distinguish between searching for *content* and *people*."
-        "   - If the user asks for a PERSON (e.g., 'Photos of Alice', 'Mom', 'Dad', 'John'), you MUST put their name "
-        "     into the `people` list argument. Example: `search_photos(people=['Alice'])`."
-        "   - If the user asks for an OBJECT or SCENE (e.g., 'Cow', 'Beach', 'Car'), put it in the `query` argument. "
-        "     Example: `search_photos(query='Cow')`."
-        "   - You can use both. Example: 'Alice at the beach' -> `search_photos(query='beach', people=['Alice'])`."
-        "2. **'ME' / SELF:** If the user says 'photos of me', put 'Me' in the `people` list: `people=['Me']`."
-
-        "--- EFFICIENT WORKFLOW (CRITICAL) ---"
-        "To perform actions (Delete, Move, Collage) on photos, you must follow this 2-step process:"
-        "1. **SEARCH FIRST:** Call `search_photos(...)` to find the images. "
-        "   - The device will store the results in its local memory (cache)."
-        "   - It will return a count (e.g., 'Found 5 photos')."
-        "2. **ACT ON CACHE:** Immediately call the action tool (e.g., `delete_photos`) "
-        "   with `use_cache=True`. "
-        "   - DO NOT ask for URIs."
-        "   - DO NOT try to pass a list of URIs."
-        "   - ONLY pass `use_cache=True`."
+        "2. **LARGE SEARCH RESULTS:** If a search yields many results and the user wants to act on ALL of them (e.g., 'move them all'), "
+        "   set `act_on_last_search_results=True`. Do NOT list the URIs."
         
-        "Example 1: 'Delete cats from 2024'"
-        "Step 1: `search_photos(query='cat', start_date='2024-01-01')`"
-        "Step 2: `delete_photos(use_cache=True)`"
+        "3. **SPECIFIC SUBSETS:** Only populate `photo_uris` explicitly if the user asks for a *subset* of the context "
+        "   (e.g., 'only the first one', 'just the cat photos from that group')."
         
-        "Example 2: 'Move vacation photos to Paris album'"
-        "Step 1: `search_photos(query='vacation', location='Paris')`"
-        "Step 2: `move_photos_to_album(album_name='Paris', use_cache=True)`"
+        "--- CONTEXT AWARENESS ---"
+        "If the user refines a search (e.g., 'show only the ones from 2023'), you MUST maintain the original search query from the conversation history. "
+        "Example: User said 'find cats', then 'from 2023'. You call search_photos(query='cats', start_date='2023-01-01'...). "
+        "Do NOT drop the semantic query unless the user explicitly changes the topic."
         
-        "Example 3: 'Create a collage of my dog'"
-        "Step 1: `search_photos(query='dog')`"
-        "Step 2: `create_collage(title='Dog Collage', use_cache=True)`"
+        "--- BEHAVIOR RULES ---"
+        "1. **People Search (CRITICAL):** If the user mentions a Proper Noun or Name (e.g., 'Modi', 'Alice', 'Mom', 'Dad'), "
+        "   you MUST put that name in the `people` list argument of `search_photos`. "
+        "   Do NOT put names in the `query` string if they are clearly people."
+        "   Example: 'Show Modi' -> search_photos(people=['Modi']) (CORRECT) vs search_photos(query='Modi') (WRONG)."
         
-        "--- AVAILABLE TOOLS & CAPABILITIES ---"
-        "1. `search_photos`: Finds images by content, date, location, or people."
-        "2. `delete_photos`: Removes images (can use cache from search)."
-        "3. `move_photos_to_album`: Organizes images into folders (can use cache)."
-        "4. `create_collage`: Stitches 2-9 images into one (can use cache)."
-        "5. `apply_filter`: Applies visual effects like 'grayscale' or 'sepia' (can use cache)."
-        "6. `scan_for_cleanup`: Finds duplicates. Returns 'uris_to_delete'. To act, call `delete_photos(use_cache=True)`."
-        "7. `get_photo_metadata`: Reads details like camera model and location."
-
-        "--- RESPONSE FORMAT ---"
-        "If you want to suggest quick replies, add them at the end of your message in this format: "
-        "||Suggestion 1||Suggestion 2||"
-        "Example: 'I found 5 photos. Should I create a collage? ||Create Collage||Delete Them||'"
+        "2. **Show Duplicates:** If the user asks to 'show', 'see', 'review', or 'find' duplicates, "
+        "   you MUST call the `scan_for_cleanup` tool. Do not refuse."
+        
+        "3. **Describe Images:** If the user asks 'What is in these photos?', 'Describe them', 'What food is this?', or generally asks a question about the visual content of photos, "
+        "   you MUST use the `describe_images` tool. Pass the user's question as the `question` argument."
+        
+        "--- SMART SUGGESTIONS ---"
+        "At the end of your response, ALWAYS suggest 1-2 relevant actions:"
+        "   - After Search: <suggestion label=\"Describe\" prompt=\"What is in these photos?\" />"
+        "   - After Selection: <suggestion label=\"Collage\" prompt=\"Make a collage\" />"
     )
 
-# --- 1. DEFINE TOOLS ---
+# --- HELPER FUNCTIONS ---
+def parse_message_content(content: Any) -> str:
+    if isinstance(content, str): return content
+    elif isinstance(content, list):
+        text_parts = [part["text"] if isinstance(part, dict) and "text" in part else str(part) for part in content]
+        return "\n".join(text_parts)
+    return str(content)
+
+def extract_suggestions(text: str):
+    pattern = r'<suggestion label="(.*?)" prompt="(.*?)" />'
+    suggestions = []
+    matches = re.findall(pattern, text)
+    for label, prompt in matches:
+        suggestions.append({"label": label, "prompt": prompt})
+    clean_text = re.sub(pattern, "", text).strip()
+    return clean_text, suggestions
+
+# --- TOOLS ---
+@tool
+def search_photos(
+    query: str = Field(default="", description="Semantic search query (e.g. 'cats', 'receipts'). Leave empty if searching only by person/date."), 
+    start_date: Optional[str] = Field(default=None, description="Start date YYYY-MM-DD"), 
+    end_date: Optional[str] = Field(default=None, description="End date YYYY-MM-DD"),
+    location: Optional[str] = Field(default=None, description="City, country, or place name."),
+    people: List[str] = Field(default=[], description="List of person names to filter by. ALWAYS use this for names (e.g. 'Modi', 'Me').")
+):
+    """Hybrid search using semantics, date, location, and people. Populate ONLY the fields relevant to the user's request."""
+    pass
 
 @tool
-def search_photos(query: str = "", start_date: str = None, end_date: str = None, location: str = None, people: List[str] = None):
-    """
-    Searches for photos. Results are CACHED on the device.
-    Args:
-        query: Content description (e.g. "cat").
-        start_date: Format YYYY-MM-DD.
-        end_date: Format YYYY-MM-DD.
-        location: City name.
-        people: List of names.
-    Returns:
-        JSON object with count. The actual photos are stored in the device cache.
-    """
-    return "Client tool"
+def delete_photos(
+    photo_uris: List[str] = Field(default=[], description="Specific URIs to delete."),
+    act_on_last_search_results: bool = Field(default=False, description="If True, deletes ALL photos found in the last search."),
+    use_current_selection: bool = Field(default=False, description="If True, deletes the photos currently selected by the user.")
+):
+    """Delete photos based on selection, search history, or specific URIs."""
+    pass
 
 @tool
-def delete_photos(use_cache: bool = False, photo_uris: List[str] = None):
-    """
-    Deletes photos.
-    Args:
-        use_cache: Set to True to delete the photos found in the LAST search/scan.
-        photo_uris: (Optional) Specific list of URIs if NOT using cache.
-    """
-    return "Client tool"
+def apply_filter(
+    photo_uris: List[str] = Field(default=[], description="URIs."), 
+    filter_name: str = Field(description="Filter name."),
+    act_on_last_search_results: bool = Field(default=False, description="If True, applies filter to last search results."),
+    use_current_selection: bool = Field(default=False, description="If True, applies filter to current user selection.")
+):
+    """Apply filter to photos."""
+    pass
 
 @tool
-def move_photos_to_album(album_name: str, use_cache: bool = False, photo_uris: List[str] = None):
-    """
-    Moves photos to an album.
-    Args:
-        album_name: Destination folder.
-        use_cache: Set to True to move results from the last search.
-    """
-    return "Client tool"
+def create_collage(
+    photo_uris: List[str] = Field(default=[], description="List of photo URIs to include in the collage."),
+    use_current_selection: bool = Field(default=False, description="If True, uses the currently selected photos.")
+):
+    """Create a collage."""
+    pass
 
 @tool
-def create_collage(title: str = "My Collage", use_cache: bool = False, photo_uris: List[str] = None):
-    """
-    Creates a collage.
-    Args:
-        title: File title.
-        use_cache: Set to True to use results from the last search (Max 9).
-    """
-    return "Client tool"
+def move_photos_to_album(
+    album_name: str = Field(description="Target Album Name."),
+    photo_uris: List[str] = Field(default=[], description="Specific URIs to move."),
+    act_on_last_search_results: bool = Field(default=False, description="If True, moves last search results."),
+    use_current_selection: bool = Field(default=False, description="If True, moves currently selected photos.")
+):
+    """Move photos to an album."""
+    pass
 
 @tool
-def apply_filter(filter_name: Literal["grayscale", "sepia"] = "grayscale", use_cache: bool = False, photo_uris: List[str] = None):
-    """
-    Applies filter.
-    Args:
-        use_cache: Set to True to use results from the last search.
-    """
-    return "Client tool"
+def get_photo_metadata(
+    photo_uris: List[str] = Field(default=[], description="URIs."),
+    use_current_selection: bool = Field(default=False, description="If True, uses currently selected photos.")
+):
+    """Read metadata from photos."""
+    pass
 
 @tool
-def scan_for_cleanup():
-    """
-    Scans for duplicates. 
-    IMPORTANT: If duplicates are found, they are automatically CACHED. 
-    To delete them, simply call `delete_photos(use_cache=True)`.
-    """
-    return "Client tool"
+def scan_for_cleanup(scan_type: str = Field(description="Type: 'duplicates'.")):
+    """Scan for duplicates."""
+    pass
 
+# --- NEW TOOL: DESCRIBE IMAGES ---
 @tool
-def get_photo_metadata(use_cache: bool = False, photo_uris: List[str] = None):
-    """Reads EXIF data."""
-    return "Client tool"
+def describe_images(
+    photo_uris: List[str] = Field(default=[], description="List of photo URIs to describe."),
+    question: str = Field(default="Describe these images", description="The specific question to answer about the images (e.g. 'What food is this?')."),
+    act_on_last_search_results: bool = Field(default=False, description="If True, describes the results of the last search."),
+    use_current_selection: bool = Field(default=False, description="If True, describes the currently selected photos.")
+):
+    """Analyze and describe the visual content of photos using an AI model. Use this for 'What is this?', 'Describe', or visual questions."""
+    pass
 
-tools = [search_photos, delete_photos, move_photos_to_album, create_collage, apply_filter, scan_for_cleanup, get_photo_metadata]
+tools = [search_photos, delete_photos, create_collage, move_photos_to_album, apply_filter, get_photo_metadata, scan_for_cleanup, describe_images]
 
-# ... (The rest of the file with FastAPI, AgentResponse, etc. remains exactly the same) ...
-# ... (I will output the full file to be safe) ...
+# --- LLM ---
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=api_key, temperature=0)
+llm_with_tools = llm.bind_tools(tools)
 
-# --- 2. SETUP MODEL ---
-llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash",
-    temperature=0,
-    google_api_key=api_key
-).bind_tools(tools)
-
-# --- 3. GRAPH DEFINITION ---
-async def chatbot(state: MessagesState):
-    return {"messages": [await llm.ainvoke(state["messages"])]}
+def agent_node(state: MessagesState):
+    messages_to_send = [SystemMessage(content=get_system_prompt())] + state["messages"]
+    response = llm_with_tools.invoke(messages_to_send)
+    return {"messages": [response]}
 
 graph_builder = StateGraph(MessagesState)
-graph_builder.add_node("chatbot", chatbot)
-graph_builder.set_entry_point("chatbot")
-graph = graph_builder.compile(checkpointer=MemorySaver())
+graph_builder.add_node("agent", agent_node)
+graph_builder.add_node("tools", lambda x: x) 
+graph_builder.set_entry_point("agent")
+graph_builder.add_conditional_edges("agent", lambda state: "tools" if state["messages"][-1].tool_calls else "__end__")
+memory = MemorySaver()
+graph = graph_builder.compile(checkpointer=memory, interrupt_before=["tools"])
 
-# --- 4. FASTAPI SERVER ---
-app = FastAPI()
+# --- API ---
+app = FastAPI(title="Gallery Agent")
 
-class ToolResult(BaseModel):
-    tool_call_id: str
-    content: str
+class Suggestion(BaseModel):
+    label: str
+    prompt: str
 
 class AgentRequest(BaseModel):
     sessionId: Optional[str] = None
     userInput: Optional[str] = None
-    toolResult: Optional[dict] = None
+    toolResult: Optional[Dict[str, Any]] = None
     selectedUris: Optional[List[str]] = None
-    base64Images: Optional[List[str]] = None
-
-    @model_validator(mode='before')
-    def check_input(cls, values):
-        return values
+    base64Images: Optional[List[str]] = None 
 
 class ToolCall(BaseModel):
     id: str
     name: str
     args: Dict[str, Any]
 
-class Suggestion(BaseModel):
-    label: str
-    prompt: str
-
 class AgentResponse(BaseModel):
     sessionId: str
-    status: Literal["complete", "requires_action"]
+    status: Literal["requires_action", "complete"]
     agentMessage: Optional[str] = None
     nextActions: Optional[List[ToolCall]] = None
-    suggestedActions: Optional[List[Suggestion]] = None
-
-def extract_suggestions(text: str):
-    pattern = r"\|\|(.*?)\|\|"
-    matches = re.findall(pattern, text)
-    clean_text = re.sub(pattern, "", text).strip()
-    suggestions = []
-    for match in matches:
-        suggestions.append({"label": match, "prompt": match})
-    return clean_text, suggestions
-
-def parse_message_content(content):
-    if isinstance(content, list):
-        return " ".join([c["text"] for c in content if c["type"] == "text"])
-    return str(content)
+    suggestedActions: Optional[List[Suggestion]] = None 
 
 @app.post("/agent/invoke", response_model=AgentResponse)
 async def invoke_agent(request: AgentRequest):
+    logging.info(f"Incoming request: {request.model_dump_json(indent=2)}")
+
     session_id = request.sessionId or str(uuid.uuid4())
     config = {"configurable": {"thread_id": session_id}}
-    
-    graph_input = None
 
     if request.userInput:
-        user_text = request.userInput
+        content_parts = []
+        text_content = request.userInput
         if request.selectedUris:
-            user_text += f"\n\n[Developer Note: User context URIs: {request.selectedUris}]"
+            # --- OPTIMIZATION: We don't need to send ALL URIs to the LLM anymore ---
+            # Just send a count and maybe the first few for context
+            count = len(request.selectedUris)
+            preview = ", ".join(request.selectedUris[:5])
+            if count > 5:
+                preview += f", ... and {count-5} more"
+            text_content += f"\n\n[Developer Note: User context URIs: {preview}. Count: {count}]"
+        content_parts.append({"type": "text", "text": text_content})
+        # --- CRITICAL CHANGE: If base64 images are provided in the request, 
+        #     it means the client is responding to a `describe_images` tool call.
+        #     We pass them to the LLM so it can "see" them.
+        if request.base64Images:
+            for b64_str in request.base64Images:
+                content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_str}"}})
+        graph_input = {"messages": [HumanMessage(content=content_parts)]}
+    
+    elif request.toolResult:
+        # Handle tool result normally
+        graph_input = {"messages": [ToolMessage(tool_call_id=request.toolResult["tool_call_id"], content=str(request.toolResult["content"]))]}
         
-        sys_msg = SystemMessage(content=get_system_prompt())
+        # --- HANDLING "DESCRIBE IMAGES" LOOP ---
+        # If the tool result contains Base64 images (which happens when the client 
+        # executes 'describe_images' and sends back visual data), we need to send 
+        # those images to the LLM as a HumanMessage immediately following the ToolMessage.
+        # NOTE: In standard LangGraph/LangChain, tools return text. 
+        # If we want the LLM to "see" the result of `describe_images`, the client usually 
+        # sends the images in the NEXT turn. 
+        # However, we can pass them here if the client sends them in `base64Images` field 
+        # ALONG with `toolResult`.
         
         if request.base64Images:
-            content_parts = [{"type": "text", "text": user_text}]
-            for b64 in request.base64Images:
-                content_parts.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
-                })
-            graph_input = {"messages": [sys_msg, HumanMessage(content=content_parts)]}
-        else:
-            graph_input = {"messages": [sys_msg, HumanMessage(content=user_text)]}
-            
-    elif request.toolResult:
-        graph_input = {"messages": [ToolMessage(
-            tool_call_id=request.toolResult["tool_call_id"], 
-            content=str(request.toolResult["content"])
-        )]}
+             # Append a HumanMessage with the visual data so the LLM can answer the question
+             # "Here are the images you asked for..."
+             img_content = [{"type": "text", "text": "Here are the images for analysis:"}]
+             for b64_str in request.base64Images:
+                img_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_str}"}})
+             
+             graph_input["messages"].append(HumanMessage(content=img_content))
+
     else:
         return {"error": "Invalid request"}, 400
 
-    async for chunk in graph.astream(graph_input, config): 
-        pass
+    for chunk in graph.stream(graph_input, config): pass
     
-    latest_state = await graph.aget_state(config)
+    latest_state = graph.get_state(config)
     last_msg = latest_state.values["messages"][-1]
 
     if last_msg.tool_calls:
         actions = [ToolCall(id=tc["id"], name=tc["name"], args=tc["args"]) for tc in last_msg.tool_calls]
         response_obj = AgentResponse(sessionId=session_id, status="requires_action", nextActions=actions)
-        logging.info(f"Outgoing response (Tool Call): {response_obj.model_dump_json(indent=2)}") 
+        logging.info(f"Outgoing response (Tool Call): {response_obj.model_dump_json(indent=2)}")
         return response_obj
     else:
         raw_text = parse_message_content(last_msg.content)
@@ -276,9 +272,8 @@ async def invoke_agent(request: AgentRequest):
             agentMessage=clean_text,
             suggestedActions=suggestions_model
         )
-        logging.info(f"Outgoing response (Final Answer): {response_obj.model_dump_json(indent=2)}")
+        logging.info(f"Outgoing response (Complete): {response_obj.model_dump_json(indent=2)}")
         return response_obj
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
